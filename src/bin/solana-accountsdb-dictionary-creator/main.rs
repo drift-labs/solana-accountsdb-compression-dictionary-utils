@@ -1,9 +1,9 @@
-// use base64;
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
 use itertools::Itertools;
 use serde_json::{json, Value};
 use solana_accounts_db::account_storage::meta::StoredMetaWriteVersion;
+use solana_accountsdb_compression_dictionary_utils::partial_pubkey_by_bits::PartialPubkeyByBits;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::account::Account;
 use solana_sdk::pubkey::Pubkey;
@@ -37,7 +37,7 @@ pub struct Args {
 
 struct KeyedAccount {
     pub pubkey: Pubkey,
-    pub write_version_obsolete: StoredMetaWriteVersion,
+    pub write_version: StoredMetaWriteVersion,
     pub account: Account,
 }
 
@@ -135,7 +135,7 @@ pub fn main() -> anyhow::Result<()> {
                             if include {
                                 val.add(KeyedAccount {
                                     pubkey: stored.meta.pubkey,
-                                    write_version_obsolete: stored.meta.write_version_obsolete,
+                                    write_version: stored.meta.write_version_obsolete,
                                     account: Account {
                                         lamports: stored.account_meta.lamports,
                                         data: stored.data.to_vec(),
@@ -166,7 +166,7 @@ pub fn main() -> anyhow::Result<()> {
                         if include {
                             vac.insert(Samples::new(KeyedAccount {
                                 pubkey: stored.meta.pubkey,
-                                write_version_obsolete: stored.meta.write_version_obsolete,
+                                write_version: stored.meta.write_version_obsolete,
                                 account: Account {
                                     lamports: stored.account_meta.lamports,
                                     data: stored.data.to_vec(),
@@ -212,6 +212,7 @@ pub fn main() -> anyhow::Result<()> {
             .map(|data| {
                 json!({
                     "pubkey": data.pubkey.to_string(),
+                    "write_version": data.write_version,
                     "data": [general_purpose::STANDARD.encode(&data.account.data)],
                     "executable": data.account.executable,
                     "lamports": data.account.lamports,
