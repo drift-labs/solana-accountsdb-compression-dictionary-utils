@@ -17,6 +17,7 @@ pub mod partial_pubkey;
 pub mod partial_pubkey_by_bits;
 pub mod solana;
 pub mod unpacked;
+pub mod drift;
 
 const SNAPSHOTS_DIR: &str = "snapshots";
 

@@ -13,6 +13,10 @@ solana-frozen-abi-macro = "1.18.16"
 solana-runtime = "1.18.16"
 solana-sdk = "1.18.16"
 solana-accounts-db = "1.18.16"
+solana-client = "1.18.16"
+solana-account-decoder = "1.18.16"
+
+anchor-lang = "0.29.0"
 
 anyhow = "1.0.75"
 async-trait = "0.1.73"
@@ -31,11 +35,12 @@ tar = "0.4.38"
 thiserror = "1.0.31"
 tokio = { version = "1.38.0", features = ["rt-multi-thread", "macros"]}
 zstd = "0.13.2"
-clap = { version = "4.5.4", features = ["derive"] }
+clap = { version = "4.5.4", features = ["derive", "env"] }
 lz4_flex = { version = "0.11.0", default-features = false }
 bs58 = "0.4.0"
 lz4 = "1.24.0"
 jemallocator = "0.3.2"
+base64 = "0.22.1"
 
 [lints.clippy]
 clone_on_ref_ptr = "deny"
