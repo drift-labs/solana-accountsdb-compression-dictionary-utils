@@ -68,6 +68,12 @@ where
 
         let pre_unpack = Instant::now();
         let versioned_bank: DeserializableVersionedBank = deserialize_from(&mut snapshot_file)?;
+
+        info!(
+            "versioned_bank slot: {} parent_slot: {}, tx count: {}",
+            versioned_bank.slot, versioned_bank.parent_slot, versioned_bank.transaction_count,
+        );
+
         drop(versioned_bank);
         let versioned_bank_post_time = Instant::now();
 
@@ -81,8 +87,18 @@ where
             versioned_bank_post_time - pre_unpack
         );
         info!(
-            "Read accounts DB fields in {:?}",
-            accounts_db_fields_post_time - versioned_bank_post_time
+            "Read accounts DB fields in {:?} accountsdbfields: {} writeVersion: {}, slot: {}",
+            accounts_db_fields_post_time - versioned_bank_post_time,
+            accounts_db_fields.0.len(),
+            accounts_db_fields.1,
+            accounts_db_fields.2,
+        );
+
+        info!(
+            "accounts_db_fields hashmap len: {} writeVersion: {}, slot: {}",
+            accounts_db_fields.0.len(),
+            accounts_db_fields.1,
+            accounts_db_fields.2,
         );
 
         Ok(ArchiveSnapshotExtractor {
@@ -90,6 +106,10 @@ where
             accounts_db_fields,
             entries: Some(entries),
         })
+    }
+
+    pub fn bank_slot(&self) -> u64 {
+        self.accounts_db_fields.2
     }
 
     fn unboxed_iter(&mut self) -> impl Iterator<Item = SnapshotResult<AppendVec>> + '_ {

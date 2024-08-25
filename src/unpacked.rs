@@ -68,6 +68,8 @@ impl UnpackedSnapshotExtractor {
         let accounts_db_fields_post_time = Instant::now();
         drop(snapshot_file);
 
+        info!("accounts_db_fields: {:?}", accounts_db_fields);
+
         info!(
             "Read bank fields in {:?}",
             versioned_bank_post_time - pre_unpack
