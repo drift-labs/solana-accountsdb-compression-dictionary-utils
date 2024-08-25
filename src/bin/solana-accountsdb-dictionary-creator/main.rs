@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use solana_accounts_db::account_storage::meta::StoredMetaWriteVersion;
 use solana_accountsdb_compression_dictionary_utils::partial_pubkey_by_bits::PartialPubkeyByBits;
 use solana_client::rpc_client::RpcClient;
-use solana_sdk::account::Account;
+use solana_sdk::account::{Account, ReadableAccount};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -234,7 +234,7 @@ pub fn main() -> anyhow::Result<()> {
 
     let mut all_accounts: Vec<Value> = vec![];
 
-    for (key, data) in latest_accounts.drain() {
+    for (_, data) in latest_accounts.drain() {
         all_accounts.push(json!({
             "pubkey": data.pubkey.to_string(),
             "write_version": data.write_version,
@@ -242,7 +242,7 @@ pub fn main() -> anyhow::Result<()> {
             "data": [general_purpose::STANDARD.encode(&data.account.data)],
             "executable": data.account.executable,
             "lamports": data.account.lamports,
-            "owner": key.to_string(),
+            "owner": data.account.owner().to_string(),
             "rentEpoch": data.account.rent_epoch,
         }));
         // let accounts: Vec<Value> = ite_sample
