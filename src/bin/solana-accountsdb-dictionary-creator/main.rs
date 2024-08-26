@@ -239,7 +239,7 @@ pub fn main() -> anyhow::Result<()> {
             "pubkey": data.pubkey.to_string(),
             "write_version": data.write_version,
             "slot": data.slot,
-            "data": [general_purpose::STANDARD.encode(&data.account.data)],
+            "data": general_purpose::STANDARD.encode(&data.account.data),
             "executable": data.account.executable,
             "lamports": data.account.lamports,
             "owner": data.account.owner().to_string(),
