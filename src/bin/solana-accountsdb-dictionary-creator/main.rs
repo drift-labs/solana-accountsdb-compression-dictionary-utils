@@ -1,13 +1,13 @@
 use base64::{engine::general_purpose, Engine as _};
 use clap::Parser;
-use itertools::Itertools;
+use lazy_static::lazy_static;
 use log::warn;
 use serde_json::{json, Value};
 use solana_accounts_db::account_storage::meta::StoredMetaWriteVersion;
-use solana_accountsdb_compression_dictionary_utils::partial_pubkey_by_bits::PartialPubkeyByBits;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::account::{Account, ReadableAccount};
 use solana_sdk::pubkey::Pubkey;
+use spl_token::state::{Account as TokenAccount, GenericTokenAccount};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -15,7 +15,8 @@ use {
     log::{error, info},
     solana_accountsdb_compression_dictionary_utils::{
         append_vec::AppendVec, append_vec_iter, archived::ArchiveSnapshotExtractor,
-        drift::get_oracle_list_for_markets, parallel::AppendVecConsumer, SnapshotExtractor,
+        drift::get_oracles_and_token_accounts_for_markets, parallel::AppendVecConsumer,
+        SnapshotExtractor,
     },
     std::fs::{create_dir_all, File},
 };
@@ -43,23 +44,72 @@ struct KeyedAccount {
     pub account: Account,
 }
 
-struct Samples {
-    pub samples: Vec<KeyedAccount>,
+lazy_static! {
+    static ref DRIFT_PID: Pubkey =
+        Pubkey::from_str("dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH").unwrap();
+    static ref DRIFT_TOKEN_ACCOUNT_OWNER: Pubkey =
+        Pubkey::from_str("JCNCMFXo5M5qwUPg2Utu1u6YWp3MbygxqBsBeXXJfrw").unwrap();
+    static ref SYSVAR_PID: Pubkey =
+        Pubkey::from_str("Sysvar1111111111111111111111111111111111111").unwrap();
+    static ref DRIFT_ORACLE_RECV_PID: Pubkey =
+        Pubkey::from_str("G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha").unwrap();
+    static ref SWITCHBOARD_PID: Pubkey =
+        Pubkey::from_str("SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f").unwrap();
+    static ref TOKEN_PROGRAM_ID: Pubkey =
+        Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    static ref ADDRESS_LUT_PID: Pubkey =
+        Pubkey::from_str("AddressLookupTab1e1111111111111111111111111").unwrap();
+    static ref DRIFT_LUTS: Vec<Pubkey> = vec![
+        Pubkey::from_str("D9cnvzswDikQDf53k4HpQ3KJ9y1Fv3HGGDFYMXnK5T6c").unwrap(),
+        Pubkey::from_str("GPZkp76cJtNL2mphCvT6FXkJCVPpouidnacckR6rzKDN").unwrap(),
+    ];
 }
 
-impl Samples {
-    pub fn new(data: KeyedAccount) -> Self {
-        Self {
-            samples: vec![data],
-        }
-    }
-
-    pub fn add(&mut self, data: KeyedAccount) {
-        self.samples.push(data);
-    }
+fn is_owner_of_interest(owner: Pubkey) -> bool {
+    owner == *DRIFT_PID
+        || owner == *SYSVAR_PID
+        || owner == *DRIFT_ORACLE_RECV_PID
+        || owner == *SWITCHBOARD_PID
+        || owner == *TOKEN_PROGRAM_ID
+        || owner == *ADDRESS_LUT_PID
 }
 
-type DictionaryMap = HashMap<PartialPubkeyByBits, Vec<u8>>;
+fn filter_oracle_accounts(account: Pubkey, oracle_accounts: &Vec<Pubkey>) -> bool {
+    oracle_accounts.contains(&account)
+}
+
+fn filter_token_accounts(token_account: Pubkey, token_accounts_of_interest: &Vec<Pubkey>) -> bool {
+    token_accounts_of_interest.contains(&token_account)
+}
+
+fn filter_address_lut_accounts(account: Pubkey) -> bool {
+    DRIFT_LUTS.contains(&account)
+}
+
+fn include_account_for_owner(
+    owner: Pubkey,
+    account: Pubkey,
+    oracle_accounts: &Vec<Pubkey>,
+    token_accounts_of_interest: &Vec<Pubkey>,
+) -> bool {
+    if !is_owner_of_interest(owner) {
+        return false;
+    }
+
+    if owner == *SWITCHBOARD_PID {
+        return filter_oracle_accounts(account, oracle_accounts);
+    }
+
+    if owner == *TOKEN_PROGRAM_ID {
+        return filter_token_accounts(account, token_accounts_of_interest);
+    }
+
+    if owner == *ADDRESS_LUT_PID {
+        return filter_address_lut_accounts(account);
+    }
+
+    true
+}
 
 pub fn main() -> anyhow::Result<()> {
     env_logger::init_from_env(
@@ -83,7 +133,8 @@ pub fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     let rpc_client = RpcClient::new(rpc_endpoint.unwrap());
-    let oracles = get_oracle_list_for_markets(&rpc_client).expect("failed to get oracles");
+    let (oracles, token_accounts_of_interest) =
+        get_oracles_and_token_accounts_for_markets(&rpc_client).expect("failed to get oracles");
     info!("got {} oracles for drift markets", oracles.len());
 
     let archive_path = PathBuf::from_str(snapshot_archive_path.as_str()).unwrap();
@@ -91,21 +142,12 @@ pub fn main() -> anyhow::Result<()> {
     let mut loader: ArchiveSnapshotExtractor<File> =
         ArchiveSnapshotExtractor::open(&archive_path).unwrap();
 
-    // let mut samples: HashMap<PartialPubkey<4>, Samples<u8>> = HashMap::new();
-    // let mut samples: HashMap<Pubkey, Samples> = HashMap::new();
     let mut latest_accounts: HashMap<Pubkey, KeyedAccount> = HashMap::new();
     let mut pid_accounts_counter: HashMap<Pubkey, u64> = HashMap::new();
 
-    let drift_pid = Pubkey::from_str("dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH")?;
-    let sysvar_pid = Pubkey::from_str("Sysvar1111111111111111111111111111111111111")?;
-    let drift_oracle_recv_pid = Pubkey::from_str("G6EoTTTgpkNBtVXo96EQp2m6uwwVh2Kt6YidjkmQqoha")?;
-    let switchboard_pid = Pubkey::from_str("SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f")?;
-
-    let sysvar_clock_account = Pubkey::from_str("SysvarC1ock11111111111111111111111111111111")?;
-
     let mut counter = 0u64;
+    let mut last_counter = 0u64;
     let mut found_counter = 0u64;
-    let mut found_oracle_counter = 0u64;
     let mut found_same_acc_same_slot = 0u64;
     let start_time = std::time::Instant::now();
     let mut last_log_time = start_time;
@@ -115,16 +157,20 @@ pub fn main() -> anyhow::Result<()> {
 
     for vec in loader.iter() {
         let current_time = std::time::Instant::now();
-        if current_time.duration_since(last_log_time).as_secs() >= 10 {
+        let time_elapsed = current_time.duration_since(last_log_time).as_secs();
+        if time_elapsed >= 10 {
+            let counter_diff = counter - last_counter;
+            let rate = counter_diff as f64 / time_elapsed as f64;
             info!(
-                "Progress: total: {}, saved: {}, oracle: {}, pid_accounts: {:?}, elapsed: {:?}",
+                "Progress: total: {} (rate: {} accounts/s), saved: {}, pid_accounts: {:?}, elapsed: {:?}",
                 counter,
+                rate,
                 found_counter,
-                found_oracle_counter,
                 pid_accounts_counter,
                 start_time.elapsed()
             );
             last_log_time = current_time;
+            last_counter = counter;
         }
 
         let append_vec = vec.unwrap();
@@ -137,99 +183,73 @@ pub fn main() -> anyhow::Result<()> {
             }
 
             let account_owner = stored.account_meta.owner;
+
+            if !include_account_for_owner(
+                account_owner,
+                stored.meta.pubkey,
+                &oracles,
+                &token_accounts_of_interest,
+            ) {
+                continue;
+            }
+
             match latest_accounts.entry(stored.meta.pubkey) {
                 std::collections::hash_map::Entry::Occupied(mut occ) => {
-                    match account_owner {
-                        pid if pid == drift_pid
-                            || pid == sysvar_pid
-                            || pid == switchboard_pid
-                            || pid == drift_oracle_recv_pid =>
-                        {
-                            let mut include = false;
-                            if pid == drift_pid || pid == sysvar_pid {
-                                include = true;
-                            } else if oracles.contains(&stored.meta.pubkey) {
-                                include = true;
-                            }
-
-                            if include {
-                                // this is the second+ time we see this account, only insert if its slot is higher than previously seen
-                                let prev_slot = occ.get().slot;
-                                if append_vec.slot() > prev_slot {
-                                    occ.insert(KeyedAccount {
-                                        pubkey: stored.meta.pubkey,
-                                        write_version: stored.meta.write_version_obsolete,
-                                        slot: append_vec.slot(),
-                                        account: Account {
-                                            lamports: stored.account_meta.lamports,
-                                            data: stored.data.to_vec(),
-                                            owner: pid,
-                                            executable: stored.account_meta.executable,
-                                            rent_epoch: stored.account_meta.rent_epoch,
-                                        },
-                                    });
-                                } else if append_vec.slot() == prev_slot {
-                                    warn!(
-                                        "got update for same slot for {} : {}, old slot: {}, new slot: {}",
-                                        pid,
-                                        stored.meta.pubkey,
-                                        prev_slot,
-                                        append_vec.slot()
-                                    );
-                                    found_same_acc_same_slot += 1;
-                                }
-                            }
-                        }
-                        _ => {}
+                    // this is the second+ time we see this account, only insert if its slot is higher than previously seen
+                    let prev_slot = occ.get().slot;
+                    if append_vec.slot() > prev_slot {
+                        occ.insert(KeyedAccount {
+                            pubkey: stored.meta.pubkey,
+                            write_version: stored.meta.write_version_obsolete,
+                            slot: append_vec.slot(),
+                            account: Account {
+                                lamports: stored.account_meta.lamports,
+                                data: stored.data.to_vec(),
+                                owner: account_owner,
+                                executable: stored.account_meta.executable,
+                                rent_epoch: stored.account_meta.rent_epoch,
+                            },
+                        });
+                    } else if append_vec.slot() == prev_slot {
+                        warn!(
+                            "got update for same slot for {} : {}, old slot: {}, new slot: {}",
+                            account_owner,
+                            stored.meta.pubkey,
+                            prev_slot,
+                            append_vec.slot()
+                        );
+                        found_same_acc_same_slot += 1;
                     }
                 }
-                std::collections::hash_map::Entry::Vacant(vac) => match account_owner {
-                    pid if pid == drift_pid
-                        || pid == sysvar_pid
-                        || pid == switchboard_pid
-                        || pid == drift_oracle_recv_pid =>
-                    {
-                        let mut include = false;
-                        if pid == drift_pid || pid == sysvar_pid {
-                            include = true;
-                        } else if oracles.contains(&stored.meta.pubkey) {
-                            include = true;
-                            found_oracle_counter += 1;
-                        }
-                        if include {
-                            pid_accounts_counter
-                                .entry(pid)
-                                .and_modify(|x| *x += 1)
-                                .or_insert(1);
+                std::collections::hash_map::Entry::Vacant(vac) => {
+                    pid_accounts_counter
+                        .entry(account_owner)
+                        .and_modify(|x| *x += 1)
+                        .or_insert(1);
 
-                            vac.insert(KeyedAccount {
-                                pubkey: stored.meta.pubkey,
-                                write_version: stored.meta.write_version_obsolete,
-                                slot: append_vec.slot(),
-                                account: Account {
-                                    lamports: stored.account_meta.lamports,
-                                    data: stored.data.to_vec(),
-                                    owner: pid,
-                                    executable: stored.account_meta.executable,
-                                    rent_epoch: stored.account_meta.rent_epoch,
-                                },
-                            });
-                            found_counter += 1;
-                        }
-                    }
-                    _ => {}
-                },
+                    vac.insert(KeyedAccount {
+                        pubkey: stored.meta.pubkey,
+                        write_version: stored.meta.write_version_obsolete,
+                        slot: append_vec.slot(),
+                        account: Account {
+                            lamports: stored.account_meta.lamports,
+                            data: stored.data.to_vec(),
+                            owner: account_owner,
+                            executable: stored.account_meta.executable,
+                            rent_epoch: stored.account_meta.rent_epoch,
+                        },
+                    });
+                    found_counter += 1;
+                }
             };
         }
     }
     let duration = start_time.elapsed();
     info!(
-        "Completed: total: {}, saved: {}, oracle: {}, same_acc_same_slot: {}, took {:?}",
-        counter, found_counter, found_oracle_counter, found_same_acc_same_slot, duration
+        "Completed: total: {}, saved: {}, same_acc_same_slot: {}, took {:?}",
+        counter, found_counter, found_same_acc_same_slot, duration
     );
 
-    // let all_program_ids = samples.iter().map(|x| *x.0).collect_vec();
-    // info!("total program ids in samples: {:?}", all_program_ids.len());
     info!("pid accounts counter: {:?}", pid_accounts_counter);
 
     let mut all_accounts: Vec<Value> = vec![];
@@ -245,25 +265,6 @@ pub fn main() -> anyhow::Result<()> {
             "owner": data.account.owner().to_string(),
             "rentEpoch": data.account.rent_epoch,
         }));
-        // let accounts: Vec<Value> = ite_sample
-        //     .samples
-        //     .iter()
-        //     .map(|data| {
-        //         json!({
-        //             "pubkey": data.pubkey.to_string(),
-        //             "write_version": data.write_version,
-        //             "slot": data.slot,
-        //             "data": [general_purpose::STANDARD.encode(&data.account.data)],
-        //             "executable": data.account.executable,
-        //             "lamports": data.account.lamports,
-        //             "owner": key.to_string(),
-        //             "rentEpoch": data.account.rent_epoch,
-        //         })
-        //     })
-        //     .collect();
-
-        // let accounts_len = accounts.len();
-        // all_accounts.extend(accounts);
     }
 
     let total_chunks = all_accounts.len() / max_accounts_per_file;
